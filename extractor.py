@@ -1,62 +1,85 @@
 import streamlit as st
-import pdfplumber
+import google.generativeai as genai
 import pandas as pd
+import json
+import os
 from io import BytesIO
 
 # --- Ρυθμίσεις ---
-FIXED_COLUMNS = ["Α/Α", "Όνομα Υλικού", "Ποσότητα", "Συνολικό Κόστος"]
+st.set_page_config(page_title="AI PDF Extractor", layout="wide")
+st.title("🤖 AI-Powered PDF Extractor (Gemini)")
+st.write("Αυτό το εργαλείο χρησιμοποιεί Τεχνητή Νοημοσύνη για να διαβάσει τους πίνακες, ανεξάρτητα από το πόσο περίπλοκοι είναι.")
 
-st.set_page_config(page_title="PDF Table Extractor", layout="wide")
+# 1. Πεδίο για το API Key (Ασφαλές, δεν φαίνεται στην οθόνη)
+api_key = st.text_input("1. Εισάγετε το Gemini API Key σας", type="password")
 
-st.title("📄 PDF to Excel Extractor")
-st.write("Ανέβασε την προκήρυξη και πάρε αυτόματα τις στήλες που θέλεις!")
+# 2. Πεδίο για το PDF
+uploaded_file = st.file_uploader("2. Ανεβάστε το PDF της προκήρυξης", type="pdf")
 
-# --- Upload Αρχείου ---
-uploaded_file = st.file_uploader("Επίλεξε το PDF αρχείο", type="pdf")
-
-if uploaded_file is not None:
-    all_dfs = []
+if api_key and uploaded_file:
+    # Ρύθμιση του API
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-1.5-flash')
     
-    with pdfplumber.open(uploaded_file) as pdf:
-        with st.spinner('Επεξεργασία PDF...'):
-            for page in pdf.pages:
-                tables = page.extract_tables()
-                for table in tables:
-                    if len(table) > 1:
-                        headers = [str(h).replace('\n', ' ').strip() if h else f"Στήλη_{i+1}" 
-                                   for i, h in enumerate(table[0])]
-                        rows = table[1:]
-                        try:
-                            temp_df = pd.DataFrame(rows, columns=headers)
-                            all_dfs.append(temp_df)
-                        except:
-                            continue
-
-    if all_dfs:
-        combined_df = pd.concat(all_dfs, ignore_index=True, sort=False)
-        combined_df.columns = [str(c).strip() for c in combined_df.columns]
+    with st.spinner("🤖 Το AI διαβάζει το PDF... Αυτό μπορεί να πάρει 10-30 δευτερόλεπτα για μεγάλα αρχεία."):
         
-        # Ταξινόμηση στηλών (Fixed + Extras)
-        found_fixed = [col for col in FIXED_COLUMNS if col in combined_df.columns]
-        extra_cols = [col for col in combined_df.columns if col not in FIXED_COLUMNS]
-        final_df = combined_df[found_fixed + extra_cols].dropna(how='all')
+        # Αποθηκεύουμε προσωρινά το αρχείο για να το στείλουμε στο API
+        temp_filename = "temp_uploaded.pdf"
+        with open(temp_filename, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+            
+        try:
+            # Ανεβάζουμε το αρχείο στην Google
+            ai_file = genai.upload_file(path=temp_filename)
+            
+            # Το Prompt (οι οδηγίες προς το AI)
+            prompt = """
+            Ανάλυσε αυτό το έγγραφο και εξήγαγε ΟΛΑ τα προϊόντα από όλους τους πίνακες που υπάρχουν.
+            Θέλω να μου επιστρέψεις μια λίστα (array) από αντικείμενα (objects).
+            Κάθε αντικείμενο στη λίστα πρέπει να αντιπροσωπεύει μια γραμμή προϊόντος και να έχει τα εξής keys:
+            - "Α/Α"
+            - "Όνομα Υλικού"
+            - "Ποσότητα"
+            - "Συνολικό Κόστος"
+            Αν υπάρχουν επιπλέον στήλες (π.χ. CPV, Μονάδα Μέτρησης, Τιμή Μονάδος), πρόσθεσέ τις ως έξτρα keys.
+            Σιγουρέψου ότι δεν θα χάσεις κανένα προϊόν από καμία σελίδα.
+            """
+            
+            # Καλούμε το API ζητώντας υποχρεωτικά JSON απάντηση
+            response = model.generate_content(
+                [prompt, ai_file],
+                generation_config={"response_mime_type": "application/json"}
+            )
+            
+            # Μετατροπή του JSON σε Πίνακα (DataFrame)
+            data = json.loads(response.text)
+            df = pd.DataFrame(data)
+            
+            st.success(f"Επιτυχία! Το AI εντόπισε {len(df)} προϊόντα.")
+            
+            # Εμφάνιση του πίνακα
+            st.dataframe(df, use_container_width=True)
+            
+            # Δημιουργία αρχείου Excel
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False)
+            
+            # Κουμπί για κατέβασμα
+            st.download_button("📥 Κατέβασμα Excel", output.getvalue(), "ai_extracted_data.xlsx")
+            
+            # Διαγραφή του αρχείου από τους servers της Google για προστασία δεδομένων
+            genai.delete_file(ai_file.name)
+            
+        except Exception as e:
+            st.error(f"Κάτι πήγε στραβά: {e}")
+            
+        # Διαγραφή του προσωρινού αρχείου από το Mac / Server
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
 
-        # Εμφάνιση Προεπισκόπησης
-        st.subheader("👀 Προεπισκόπηση Δεδομένων")
-        st.dataframe(final_df, use_container_width=True)
-
-        # --- Μετατροπή σε Excel για κατέβασμα ---
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            final_df.to_excel(writer, index=False)
-        
-        st.download_button(
-            label="📥 Κατέβασμα σε Excel (.xlsx)",
-            data=output.getvalue(),
-            file_name="extracted_data.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-        
-        st.success("Έτοιμο! Μπορείς να κατεβάσεις το αρχείο και να το κάνεις Import στο Google Sheets.")
-    else:
-        st.error("Δεν βρέθηκαν πίνακες στο αρχείο.")
+else:
+    if not api_key:
+        st.info("ℹ️ Παρακαλώ εισάγετε το API Key σας για να ξεκινήσετε.")
+    elif not uploaded_file:
+        st.info("ℹ️ Παρακαλώ ανεβάστε ένα PDF αρχείο.")
