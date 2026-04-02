@@ -35,7 +35,9 @@ if api_key and uploaded_file:
             
             prompt = f"""
             Ανάλυσε το παρακάτω κείμενο που προέρχεται από μια προκήρυξη και εξήγαγε ΟΛΑ τα προϊόντα/υλικά από όλους τους πίνακες που υπάρχουν.
-            Θέλω να μου επιστρέψεις ΜΟΝΟ μια έγκυρη JSON λίστα (array) από αντικείμενα (objects). Μην βάλεις markdown code blocks (```json).
+            Θέλω να μου επιστρέψεις ΜΟΝΟ μια έγκυρη JSON λίστα (array) από αντικείμενα (objects).
+            Μην γράψεις κανένα άλλο κείμενο, εξήγηση ή σχόλιο πριν ή μετά το JSON.
+            
             Κάθε αντικείμενο στη λίστα πρέπει να αντιπροσωπεύει μια γραμμή προϊόντος και να έχει τα εξής keys:
             - "Α/Α"
             - "Όνομα Υλικού"
@@ -51,10 +53,7 @@ if api_key and uploaded_file:
             payload = {
                 "contents": [{
                     "parts": [{"text": prompt}]
-                }],
-                "generationConfig": {
-                    "responseMimeType": "application/json"
-                }
+                }]
             }
             
             headers = {'Content-Type': 'application/json'}
@@ -67,6 +66,19 @@ if api_key and uploaded_file:
                 else:
                     res_json = response.json()
                     text_response = res_json['candidates'][0]['content']['parts'][0]['text']
+                    
+                    # --- Καθαρισμός του JSON αν το AI έβαλε ```json ή ``` ---
+                    text_response = text_response.strip()
+                    if text_response.startswith("```json"):
+                        text_response = text_response[7:]
+                    elif text_response.startswith("```"):
+                        text_response = text_response[3:]
+                    
+                    if text_response.endswith("```"):
+                        text_response = text_response[:-3]
+                        
+                    text_response = text_response.strip()
+                    # --------------------------------------------------------
                     
                     # Μετατροπή του JSON κειμένου σε DataFrame
                     data = json.loads(text_response)
